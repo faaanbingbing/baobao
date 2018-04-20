@@ -1,4 +1,4 @@
-﻿import gym
+import gym
 from gym import spaces
 from gym.utils import seeding
 
@@ -33,7 +33,7 @@ class MooEnv(object):
     """
     def __init__(self, id=0, debug=0):
         self.id = id
-        self.debug = 0
+        self.debug = self.id==0 and 1
         
         #~ self.action_space = spaces.Discrete(6)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,) )
@@ -54,9 +54,17 @@ class MooEnv(object):
         self.rF = None
         self.rAp = None
         
-        self.LimitVc = 1e-3, 1.
-        self.LimitF = 1e-3, 1.
-        self.LimitAp = 1e-3, .5
+        self.LimitVc = 1e-8, 1.
+        self.LimitF = 1e-8, 1.
+        self.LimitAp = 1e-8, .4
+        self.Limits = zip(self.LimitVc, self.LimitF, self.LimitAp)
+        self.Limitx = zip(self.LimitVc, self.LimitF, self.LimitAp, self.LimitVc, self.LimitF, self.LimitAp)
+        self.Limits = list(map(np.array, self.Limits))
+        self.Limitx = list(map(np.array, self.Limitx))
+        self.LimitEnergy = 1e-8, 4000.
+        
+        self.solution_info = None
+        self.best_reward = None
         
         self.act_min = np.zeros(self.action_space.shape)
         self.act_max = np.zeros(self.action_space.shape)
@@ -83,14 +91,19 @@ class MooEnv(object):
         return self.gen_obs()
     
     def check_states(self):
-        if self.LimitVc[0]<=self.rVc<=self.LimitVc[1] and \
-                    self.LimitF[0]<=self.rF<=self.LimitF[1] and \
-                    self.LimitAp[0]<=self.rAp<=self.LimitAp[1] and \
-                    self.LimitVc[0]<=self.fVc<=self.LimitVc[1] and \
-                    self.LimitF[0]<=self.fF<=self.LimitF[1] and \
-                    self.LimitAp[0]<=self.fAp<=self.LimitAp[1]:
-            return True
-        return False
+        #~ if self.LimitVc[0]<=self.rVc<=self.LimitVc[1] and \
+                    #~ self.LimitF[0]<=self.rF<=self.LimitF[1] and \
+                    #~ self.LimitAp[0]<=self.rAp<=self.LimitAp[1] and \
+                    #~ self.LimitVc[0]<=self.fVc<=self.LimitVc[1] and \
+                    #~ self.LimitF[0]<=self.fF<=self.LimitF[1] and \
+                    #~ self.LimitAp[0]<=self.fAp<=self.LimitAp[1]:
+            #~ return True
+        #~ return False
+        check_list = [self.rVc, self.rF, self.rAp, self.fVc, self.fF, self.fAp]
+        if (self.Limitx[0]>check_list).any() or (self.Limitx[1]<check_list).any():
+            print('!check_states failed!')
+            return False
+        return True
     
     def gen_cuts(self, rAp0=None, fAp=None, k=1., eps=.05):
         if rAp0 is None:
@@ -103,34 +116,58 @@ class MooEnv(object):
         else:
             rApL = (k - fAp) % rAp0
             Nr = (k - fAp) // rAp0 + 1
-        cuts = [rAp0,]*int(Nr-1) + [rApL,] + [fAp,]
+        cuts = [rAp0,]*int(Nr-1) + [rApL, fAp]
         return cuts
     
     def f_energy(self, cuts):
-        """ objective function """
+        """ objective function
+        @return: energy * D^2
+        """
         energy = 0.
         T = self.T
-        def get_energy(vc, cd, ap, D):
-            X = [vc, cd, ap, 1,0,0,0,1,0]
-            energy_ = self.estimator.predict(np.array([X])) * D**2
-            return  energy_[0]
+        Ts = []
+        Xs, x_fix = [], [1,0,0,0,1,0]
+        def get_energy(X):
+            return  self.estimator.predict(X)
         # roughing cut
         for d in cuts[:-1]:
-            energy += get_energy(self.rVc, self.rF, self.rAp, T)
+            Xs.append([self.rVc, self.rF, self.rAp] + x_fix)
+            Ts.append(T)
             T -= d
+        # roughing end
+        assert 0<T<1
         # finishing cut
-        energy += get_energy(self.fVc, self.fF, self.fAp, T)
-        return energy
+        Xs.append([self.fVc, self.fF, self.fAp] + x_fix)
+        Ts.append(T)
+        # finishing end
+        D = np.array(Ts)
+        Xs = np.array(Xs)
+        energy = get_energy(Xs)
+        energy = energy.clip(*self.LimitEnergy) / self.LimitEnergy[1]
+        energy *= D**2
+        # debug begin
+        #~ if self.debug:
+            #~ print('D %r E %r'%(D.shape, energy.shape))
+        # debug end
+        return energy.sum()
     
     def reward(self, cuts):
         """ Normalized reward """
-        #~ R = -self.f_energy(cuts)/4000.
         R = -self.f_energy(cuts)
         return R
     
     def make_obs(self, d_fVc, d_fF, d_fAp, d_rVc, d_rF, d_rAp):
         """ States 
         """
+        if 1:
+            d_fVc = np.clip(d_fVc, *self.LimitVc)
+            d_fF = np.clip(d_fF, *self.LimitF)
+            d_fAp = np.clip(d_fAp, *self.LimitAp)
+            
+            d_rVc = np.clip(d_rVc, *self.LimitVc)
+            d_rF = np.clip(d_rF, *self.LimitF)
+            d_rAp = np.clip(d_rAp, *self.LimitAp)
+        
         self.fVc += d_fVc
         self.fF += d_fF
         self.fAp += d_fAp
@@ -139,6 +176,15 @@ class MooEnv(object):
         self.rF += d_rF
         self.rAp += d_rAp
         
+        if 1:
+            self.fVc = np.clip(self.fVc, *self.LimitVc)
+            self.fF = np.clip(self.fF, *self.LimitF)
+            self.fAp = np.clip(self.fAp, *self.LimitAp)
+            
+            self.rVc = np.clip(self.rVc, *self.LimitVc)
+            self.rF = np.clip(self.rF, *self.LimitF)
+            self.rAp = np.clip(self.rAp, *self.LimitAp)
+        
         return self.gen_obs()
     
     def reset(self, ):
@@ -146,8 +192,8 @@ class MooEnv(object):
         
         self.frame_count = 0
         # debug begin
-        if self.debug and self.id==0:
-            print('reset obs', obs)
+        #~ if self.debug:
+            #~ print('reset obs', obs)
         # debug end
         return obs
     
@@ -169,16 +215,29 @@ class MooEnv(object):
             cuts = self.gen_cuts(self.rAp, self.fAp)
             reward = self.reward(cuts)
         
+        # limit steps begin
         self.frame_count += 1
+        if self.frame_count>=1e3:
+            self.frame_count = 0
+            done = 1
+        # limit steps end
         
         # debug begin
-        #~ if self.debug and self.id==0:
-            #~ print('cuts', cuts)
-            #~ print('action', action)
-            #~ print('done', done, reward)
-        #~ if self.frame_count>=300:
-            #~ self.frame_count = 0
-            #~ done = 1
+        if self.solution_info is None or reward>self.solution_info[1]:
+            solution = 'solution Nc:%d r(Vc%.3f F%.3f Ap%.3f) f(Vc%.3f F%.3f Ap%.3f) r:%g'%\
+                        (len(cuts), self.rVc, self.rF, self.rAp, self.fVc, self.fF, self.fAp, reward)
+            self.solution_info = [solution, reward, 1]
+            if self.best_reward is None:
+                self.best_reward = reward
+        #~ if self.debug:
+            #~ print('cuts %r %r reward %r'%(sum(cuts), len(cuts), reward))
+        if done:
+            #~ if self.debug:
+                #~ print('cuts %r %r reward %r'%(sum(cuts), len(cuts), reward))
+                #~ print(self.solution_info)
+            if self.best_reward<self.solution_info[1]:
+                info.update(solution=self.solution_info)
+                self.best_reward = self.solution_info[1]
         # debug end
         
         return obs, float(reward), done, info
