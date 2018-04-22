@@ -1,4 +1,4 @@
-import gym
+﻿import gym
 from gym import spaces
 from gym.utils import seeding
 
@@ -16,6 +16,8 @@ import struct
 from sklearn import svm
 from sklearn.externals import joblib
 
+from math import pi as PI
+
 
 def make_env(env_id, seed, rank, log_dir=None, env_args={}):
     def _thunk():
@@ -26,6 +28,14 @@ def make_env(env_id, seed, rank, log_dir=None, env_args={}):
         env.seed(seed + rank)
         return env
     return _thunk
+
+
+@np.vectorize
+def MinMaxScale(x, x_min, x_max, clip=1):
+    xn = (x - x_min)/(x_max - x_min)
+    if not clip:
+        return xn
+    return np.clip(xn, 0, 1)
 
 
 class MooEnv(object):
@@ -40,11 +50,19 @@ class MooEnv(object):
         
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(6,) )
         
+        self.init_mop()
+        
+        # debug begin
+        self.frame_count = 0
+        # debug end
+        self._gym_vars()
+    
+    def init_mop(self):
         _path = os.path.dirname(__file__)
         self.estimator = joblib.load(os.path.join(_path, './model_svr.pkl'))
         
-        self.D = 1.
-        self.T = None
+        self.D = 60
+        self.Dfinal = 30
         
         self.fVc = None
         self.fF = None
@@ -54,60 +72,46 @@ class MooEnv(object):
         self.rF = None
         self.rAp = None
         
-        self.LimitVc = 1e-8, 1.
-        self.LimitF = 1e-8, 1.
-        self.LimitAp = 1e-8, .4
-        self.Limits = zip(self.LimitVc, self.LimitF, self.LimitAp)
-        self.Limitx = zip(self.LimitVc, self.LimitF, self.LimitAp, self.LimitVc, self.LimitF, self.LimitAp)
-        self.Limits = list(map(np.array, self.Limits))
-        self.Limitx = list(map(np.array, self.Limitx))
-        self.LimitEnergy = 1e-8, 4000.
+        self.LimitVc = 14, 240
+        self.LimitF = 0.06, 0.3246
+        self.LimitApr = 1.0, 2.75
+        self.LimitApf = 0.5, 1.0
+        self.Limit6 = zip(self.LimitVc, self.LimitF, self.LimitApf, self.LimitVc, self.LimitF, self.LimitApr)
+        self.Limit6 = list(map(np.array, self.Limit6))
+        self.LimitPcut = 1e-8, 4000.
+        
+        self.Vminmax = 14, 247
+        self.Fminmax = 0.06, 0.3246
+        self.APminmax = 0.5, 2.75
+        self.VFAPminmax = list(zip(self.Vminmax, self.Fminmax, self.APminmax))
         
         self.solution_info = None
         self.best_reward = None
-        
-        self.act_min = np.zeros(self.action_space.shape)
-        self.act_max = np.zeros(self.action_space.shape)
-        
-        # debug begin
-        self.frame_count = 0
-        # debug end
-        self._gym_vars()
     
-    def gen_obs(self):
+    def make_obs(self):
         return np.array([self.fVc, self.fF, self.fAp, self.rVc, self.rF, self.rAp])
     
-    def gen_states(self, D=None):
-        self.T = self.D if D is None else D
-        
+    def init_states(self, ):
         self.fVc = np.random.uniform(*self.LimitVc)
         self.fF = np.random.uniform(*self.LimitF)
-        self.fAp = np.random.uniform(*self.LimitAp)
+        self.fAp = np.random.uniform(*self.LimitApf)
         
         self.rVc = np.random.uniform(*self.LimitVc)
         self.rF = np.random.uniform(*self.LimitF)
-        self.rAp = np.random.uniform(*self.LimitAp)
-        
-        return self.gen_obs()
+        eps = np.finfo(np.float32).eps
+        self.rAp = np.random.uniform(self.LimitApr[0], self.LimitApr[1] - self.fAp - eps)
     
-    def check_states(self):
-        #~ if self.LimitVc[0]<=self.rVc<=self.LimitVc[1] and \
-                    #~ self.LimitF[0]<=self.rF<=self.LimitF[1] and \
-                    #~ self.LimitAp[0]<=self.rAp<=self.LimitAp[1] and \
-                    #~ self.LimitVc[0]<=self.fVc<=self.LimitVc[1] and \
-                    #~ self.LimitF[0]<=self.fF<=self.LimitF[1] and \
-                    #~ self.LimitAp[0]<=self.fAp<=self.LimitAp[1]:
-            #~ return True
-        #~ return False
-        check_list = [self.rVc, self.rF, self.rAp, self.fVc, self.fF, self.fAp]
-        if (self.Limitx[0]>check_list).any() or (self.Limitx[1]<check_list).any():
+    def check_states(self, obs):
+        if (self.Limit6[0]>obs).any() or (self.Limit6[1]<obs).any():
             print('!check_states failed!')
             return False
         return True
     
-    def gen_cuts(self, rAp0=None, fAp=None, k=1., eps=.05):
-        if rAp0 is None:
-            rAp0, fAp = np.random.uniform(*self.LimitAp, size=(2,))
+    def planning_cuts(self, eps=.05):
+        """ k: 初始余量 (mm)
+        """
+        k = (self.D - self.Dfinal)/2
+        rAp0, fAp = self.rAp, self.fAp
         rApL = (k - fAp)%rAp0
         d = (rApL - rAp0) / rAp0
         if 0<d<=eps:
@@ -119,54 +123,74 @@ class MooEnv(object):
         cuts = [rAp0,]*int(Nr-1) + [rApL, fAp]
         return cuts
     
-    def f_energy(self, cuts):
-        """ objective function
-        @return: energy * D^2
+    def Pcut(self, Nr):
+        """ x_fix: al,40cr,45,80,55,steel
         """
-        energy = 0.
-        T = self.T
-        Ts = []
-        Xs, x_fix = [], [1,0,0,0,1,0]
-        def get_energy(X):
-            return  self.estimator.predict(X)
-        # roughing cut
-        for d in cuts[:-1]:
-            Xs.append([self.rVc, self.rF, self.rAp] + x_fix)
-            Ts.append(T)
-            T -= d
-        # roughing end
-        assert 0<T<1
-        # finishing cut
-        Xs.append([self.fVc, self.fF, self.fAp] + x_fix)
-        Ts.append(T)
-        # finishing end
-        D = np.array(Ts)
-        Xs = np.array(Xs)
-        energy = get_energy(Xs)
-        energy = energy.clip(*self.LimitEnergy) / self.LimitEnergy[1]
-        energy *= D**2
-        # debug begin
-        #~ if self.debug:
-            #~ print('D %r E %r'%(D.shape, energy.shape))
-        # debug end
-        return energy.sum()
+        Xs, x_fix = [], [0,1,0,0,1,0]
+        rX = MinMaxScale([self.rVc, self.rF, self.rAp], *self.VFAPminmax)
+        fX = MinMaxScale([self.fVc, self.fF, self.fAp], *self.VFAPminmax)
+        rX = np.tile(np.append(rX, x_fix), (Nr,1))
+        fX = np.append(fX, x_fix)
+        Xs = np.vstack((rX, fX))
+        return self.estimator.predict(Xs).clip(*self.LimitPcut)
     
-    def reward(self, cuts):
+    def f_objectives(self, cuts, Lair=15, Lcut=100, Pst=945, t_st=50, t_pct=300):
+        """ 注意D是每一刀开始的直径,所以d_f是self.D减去粗加工的剩余
+        """
+        Ds = [self.D-ap*2 for ap in cuts[:-1]]
+        Dr, d_f = [self.D]+Ds[:-1], Ds[-1]
+        
+        t = lambda D, L, Vc, f: 3.14*D*L/(1000.*Vc*f)
+        
+        t_air_r = [t(d_r, Lair, self.rVc, self.rF) for d_r in Dr]
+        t_air_f = t(d_f, Lair, self.fVc, self.fF)
+        t_cut_r = [t(d_r, Lcut, self.rVc, self.rF) for d_r in Dr]
+        t_cut_f = t(d_f, Lcut, self.fVc, self.fF)
+        
+        def Est():
+            return Pst*(t_st + sum(t_air_r) + t_air_f + sum(t_cut_r) + t_cut_f)
+        
+        def Eu():
+            pu = lambda Vc,D: -39.45*(1e3*Vc/(PI*D)) + 0.03125*(1e3*Vc/(PI*D))**2 + 17183
+            Pu_r = np.array( [pu(self.rVc, d_r) for d_r in Dr] )
+            Pu_f = pu(self.fVc, d_f)
+            return Pu_r.dot(t_air_r) + Pu_f*t_air_f + Pu_r.dot(t_cut_r) + Pu_f*t_cut_f
+        
+        def Emr():
+            Pmr = self.Pcut(Nr=len(cuts)-1)
+            return Pmr[:-1].dot(t_cut_r) + Pmr[-1]*t_cut_f
+        
+        def Eauc(Pcf=80, Phe=1000):
+            return (Pcf+Phe)*(sum(t_air_r) + t_air_f + sum(t_cut_r) + t_cut_f)
+        
+        T = lambda Vc, f, Ap: 60* 4.43*10**12/(Vc**6.8*f**1.37*Ap**0.24)
+        Tr = [1/T(self.rVc, self.rF, ap_r) for ap_r in cuts[:-1]]
+        Tf = 1/T(self.fVc, self.fF, cuts[-1])
+        t_ect = np.array(t_cut_r).dot(Tr) + t_cut_f*Tf
+        
+        def Ect():
+            return Pst*t_pct*t_ect
+        
+        SEC = (Est()+Eu()+Emr()+Eauc()+Ect())/(0.785*(self.D**2-self.Dfinal**2)*Lcut)
+        Tp = t_st + sum(t_air_r) + sum(t_cut_r) + t_air_f + t_cut_f + t_pct*t_ect
+        
+        def Cp(k0=0.3, ke=0.13, Ch=82.5, ne=2, Ci=2.5):
+            kt = Ch/400 + Ci/(0.75*ne)
+            return k0*Tp + ke*Tp + kt*t_ect
+        
+        return SEC, Tp, Cp()
+    
+    def reward(self, ):
         """ Normalized reward """
-        R = -self.f_energy(cuts)
-        return R
+        cuts = self.planning_cuts()
+        f0, f1, f2 =objs= self.f_objectives(cuts)
+        R = -sum(np.tanh(objs)*0.3)
+        return R, cuts
     
-    def make_obs(self, d_fVc, d_fF, d_fAp, d_rVc, d_rF, d_rAp):
+    def on_step(self, action):
         """ States 
         """
-        if 1:
-            d_fVc = np.clip(d_fVc, *self.LimitVc)
-            d_fF = np.clip(d_fF, *self.LimitF)
-            d_fAp = np.clip(d_fAp, *self.LimitAp)
-            
-            d_rVc = np.clip(d_rVc, *self.LimitVc)
-            d_rF = np.clip(d_rF, *self.LimitF)
-            d_rAp = np.clip(d_rAp, *self.LimitAp)
+        d_fVc, d_fF, d_fAp, d_rVc, d_rF, d_rAp = np.clip(action, *self.Limit6)
         
         self.fVc += d_fVc
         self.fF += d_fF
@@ -176,44 +200,29 @@ class MooEnv(object):
         self.rF += d_rF
         self.rAp += d_rAp
         
-        if 1:
-            self.fVc = np.clip(self.fVc, *self.LimitVc)
-            self.fF = np.clip(self.fF, *self.LimitF)
-            self.fAp = np.clip(self.fAp, *self.LimitAp)
-            
-            self.rVc = np.clip(self.rVc, *self.LimitVc)
-            self.rF = np.clip(self.rF, *self.LimitF)
-            self.rAp = np.clip(self.rAp, *self.LimitAp)
-        
-        return self.gen_obs()
+        self.fVc, self.fF, self.fAp, \
+        self.rVc, self.rF, self.rAp = self.make_obs().clip(*self.Limit6)
     
     def reset(self, ):
-        obs = self.gen_states()
-        
+        self.init_states()
         self.frame_count = 0
-        # debug begin
-        #~ if self.debug:
-            #~ print('reset obs', obs)
-        # debug end
-        return obs
+        return self.make_obs()
     
     
     def step(self, action):
-        assert self.T is not None
         
         info, done = {}, 0
         
-        #~ self.act_min = min(self.act_min, action)
-        #~ self.act_max = max(self.act_max, action)
+        self.on_step(action)
         
-        obs = self.make_obs(*action)
+        obs = self.make_obs()
         
-        if self.check_states() is False:
+        if self.check_states(obs) is False:
             done = 1
             reward = -1
+            print("Fatal Error: should not happen")
         else:
-            cuts = self.gen_cuts(self.rAp, self.fAp)
-            reward = self.reward(cuts)
+            reward, cuts = self.reward()
         
         # limit steps begin
         self.frame_count += 1
