@@ -1,4 +1,4 @@
-﻿from __future__ import division
+from __future__ import division
 
 import gym
 from gym import spaces
@@ -562,9 +562,9 @@ class MooEnv2(MooEnv):
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(9,) )
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(7,) )
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(6,) )
-#             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(5,) )
+            self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(5,) )
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(4,) )
-            self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,) )
+#             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,) )
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(2,) )
 #             self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(1,) )
         
@@ -629,7 +629,9 @@ class MooEnv2(MooEnv):
 #             return np.array( [self.Stage, self.Dt, self.Kt] )
 #             return np.array( [self.Kt] )
 #             return np.array( [self.Dt, self.Kt] )
-            return np.array( [self.step_objs[self.single_obj_type], self.Dt, self.Kt] )
+#             return np.array( [self.Dt/self.D, self.Kt/self.K0] )
+#             return np.array( [self.step_objs[self.single_obj_type], self.Dt, self.Kt] )
+            return np.array( [self.Dt, self.Kt, self.tVc,self.tF,self.tAp] )  # pretrain test
 #             return np.array( [self.step_objs[self.single_obj_type], self.Dt, self.Kt, self.tVc,self.tF,self.tAp] )  # pretrain
 #             return np.array( [self.step_objs[self.single_obj_type], *self.step_penalty, self.Dt, self.Kt, self.tVc,self.tF,self.tAp] )
 #             return np.array( [self.ep_punish, self.Dt, self.Kt] )
@@ -783,17 +785,17 @@ class MooEnv2(MooEnv):
 #         return a*cis.sum(), cis[cis>0].size, cis
         return a*np.power(cis,t).sum(), cis[cis>0].size, cis
     
-    def reward(self, mo=0):
+    def reward(self, mo=0, ea=0):
         f0, f1, f2, p0, info = self.f_objectives()
         mobj = np.array([f0, f1, f2])
-#         p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=1e7)
-#         p_3, np_3, ci_3 = self.penalty_3(a=1e7)
-#         p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=3e2)
-        p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=3e3)
-#         p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=1)
-#         p_3, np_3, ci_3 = self.penalty_3(a=3e2)
-        p_3, np_3, ci_3 = self.penalty_3(a=3e3)
-#         p_3, np_3, ci_3 = self.penalty_3(a=1)
+        if ea:
+            p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=1e7)
+            p_3, np_3, ci_3 = self.penalty_3(a=1e7)
+        else:
+#             p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=3e2)
+            p_ap, np_ap, ci_ap = self.penaltyAp(self.tAp, a=3e3)
+#             p_3, np_3, ci_3 = self.penalty_3(a=3e2)
+            p_3, np_3, ci_3 = self.penalty_3(a=3e3)
         self.step_penalty = np.concatenate((ci_ap, ci_3))
 #         self.step_penalty = ci_ap.copy()
 #         mobj = np.tanh(mobj)
@@ -809,7 +811,7 @@ class MooEnv2(MooEnv):
         # punish begin
         punish = 0.
         punish += p_ap
-#         punish += p_3
+        punish += p_3
 #         if self.id%2==0:
 #             punish += p_ap
 #             punish += p_3
@@ -839,7 +841,7 @@ class MooEnv2(MooEnv):
         mobj += punish                  # pretrain
         # punish end
         # keep step info begin
-        Rs = self.step_objs - mobj
+#         Rs = self.step_objs - mobj
         self.step_objs = mobj.copy()
         self.ep_objs += mobj
         # keep step info end
@@ -853,10 +855,11 @@ class MooEnv2(MooEnv):
 #             Rs += -punish
 #             R = Rs[self.single_obj_type]
 #             R = - np.tanh(p_ap)
-#             R = - punish
+            R = -f0 -punish*1e-1    # best
+#             R = -f0 -punish
 #             R = -f0 -punish     # pretrain
-            R = (-f0 -punish)*1e-2     # pretrain
 #             R = -punish     # finetune
+#             R = -f0
 #             R = -(np_ap + np_3)
 #             R = -(p_ap + p_3)
 #             R = -math.log(punish+1)
@@ -914,7 +917,7 @@ class MooEnv2(MooEnv):
             else:
                 self.tAp = self.Kt
                 # F constraint begin
-                self.tF = min(self.rF_min/1.5, self.tF)
+#                 self.tF = min(self.rF_min/1.5, self.tF)
                 # F constraint end
                 finish = 1
                 self.Stage = -1
@@ -1034,7 +1037,7 @@ class MooEnv2(MooEnv):
         n_sol = 0
         for x in X:
             done = self.begin_step(x)
-            _, mobj, step_info = self.reward(mo=mo)
+            _, mobj, step_info = self.reward(mo=mo, ea=1)
             # debug info
 #             step_info.update(done=done)
             dbg_info.append(step_info)
@@ -1073,7 +1076,8 @@ class MooEnv2(MooEnv):
             i = 'F' if i==last else str(i)
             sol += '[%s] Vc:%.3f f:%.3f Ap:%.3f Dt:%.3f Kt:%.3f Kt1:%.3f\n'%(i, *cut)
         sol += '------------------ %.6fmm (K0 %.6f)------------------\n'%(cut_depth, self.K0)
-        sol += 'OBJECTIVE: %.3f, Penalty %.3f'%(self.ep_objs[self.single_obj_type], self.ep_punish)
+#         sol += 'OBJECTIVE: %.3f, Penalty %.3f'%(self.ep_objs[self.single_obj_type], self.ep_punish)
+        sol += 'Penalty %.3f'%(self.ep_punish, )
         if getAp:
             return cut_depth
         return sol
@@ -1109,7 +1113,9 @@ class MooEnv2a(MooEnv):
     def init_states(self, ):
         self.Dt = self.D
         self.Kt = self.LimitApf[1]
-        self.K0 = self.K
+#         self.Dt = 60
+#         self.Kt = 14
+        self.K0 = self.Kt
         self.Kf = 0
         self.Stage = 0
         self.tVc = None
@@ -1478,8 +1484,9 @@ class MooEnv2a(MooEnv):
             cut_depth += cut[2]
             i = 'F' if i==last else str(i)
             sol += '[%s] Vc:%.3f f:%.3f Ap:%.3f Dt:%.3f Kt:%.3f Kt1:%.3f\n'%(i, *cut)
-        sol += '------------------ %.3fmm ------------------\n'%cut_depth
-        sol += 'OBJECTIVE: %.3f, Penalty %.3f'%(self.ep_objs[self.single_obj_type], self.ep_punish)
+        sol += '------------------ %.6fmm ------------------\n'%cut_depth
+#         sol += 'OBJECTIVE: %.3f, Penalty %.3f'%(self.ep_objs[self.single_obj_type], self.ep_punish)
+        sol += 'Penalty %.3f'%(self.ep_punish, )
         if getAp:
             return cut_depth
         return sol
